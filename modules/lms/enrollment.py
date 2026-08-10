@@ -14,7 +14,8 @@ from urllib.parse import urlparse, parse_qs
 from flask import Blueprint, request, redirect, url_for, session
 
 from app.shared import get_db
-from .routes import lms_page, require_staff
+from .routes import lms_page, require_staff, require_admin, require_course_access
+from .sso import is_sso_configured
 
 
 def _youtube_video_id(url):
@@ -136,7 +137,7 @@ def recompute_progress(conn, enrollment_id):
 
 @enrollment_bp.route("/learners", methods=["GET", "POST"])
 def learners():
-    gate = require_staff()
+    gate = require_admin()
     if gate: return gate
     conn = get_db()
     if request.method == "POST":
@@ -216,7 +217,7 @@ def learners():
 
 @enrollment_bp.route("/learners/<int:user_id>")
 def learner_detail(user_id):
-    gate = require_staff()
+    gate = require_admin()
     if gate: return gate
     conn = get_db()
     learner = conn.execute("SELECT * FROM lms_users WHERE id = ?", (user_id,)).fetchone()
@@ -310,7 +311,7 @@ def learner_detail(user_id):
 
 @enrollment_bp.route("/courses/<int:course_id>/learners", methods=["GET", "POST"])
 def course_learners(course_id):
-    gate = require_staff()
+    gate = require_course_access(course_id)
     if gate: return gate
     conn = get_db()
 
@@ -415,22 +416,36 @@ def login():
         f'<option value="{u["id"]}">{u["name"]} ({u["email"]})</option>' for u in users
     )
     next_arg = request.args.get("next", "")
+    sso_html = ""
+    if is_sso_configured():
+        sso_next = f"?next={next_arg}" if next_arg else ""
+        sso_html = f"""
+        <div class="card" style="text-align:center;">
+          <p style="margin-bottom:.75rem;color:var(--muted);font-size:.85rem;">Đăng nhập bằng tài khoản công ty</p>
+          <a class="btn btn-primary" href="/lms/sso/login{sso_next}"
+             style="display:inline-flex;align-items:center;gap:.5rem;">
+            <span style="font-size:1.1rem;">🪟</span> Đăng nhập bằng Microsoft
+          </a>
+        </div>
+        <div style="text-align:center;color:var(--muted);font-size:.8rem;margin:1rem 0;">— hoặc dùng dropdown (dev) —</div>
+        """
     content = f"""
     <div class="page">
       <div class="page-header">
         <h1>LMS Login</h1>
-        <p>Chọn learner để bắt đầu học. Stopgap auth — chưa phải SSO thật.</p>
+        <p>{'Chọn tài khoản để đăng nhập.' if is_sso_configured() else 'Chọn learner để bắt đầu học (dev fallback, chưa phải SSO thật).'}</p>
       </div>
+      {sso_html}
       <div class="card">
         <form method="POST" action="/lms/login?next={next_arg}">
           <div class="form-group">
-            <label class="form-label">Learner</label>
+            <label class="form-label">Learner (dev dropdown)</label>
             <select class="form-control" name="user_id" required>
               <option value="">-- Chọn learner --</option>
               {options}
             </select>
           </div>
-          <button class="btn btn-primary" type="submit">Đăng nhập</button>
+          <button class="btn btn-ghost" type="submit">Đăng nhập</button>
         </form>
       </div>
     </div>

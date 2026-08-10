@@ -8,7 +8,6 @@ load các module khác). Nếu main.py dùng cách import khác, chỉnh dòng i
 bên dưới cho khớp — báo tao nội dung main.py để sửa chính xác.
 """
 import os
-import sqlite3
 from flask import Blueprint, request, redirect, url_for, session
 
 from app.shared import get_db, BASE_STYLE, BASE_JS
@@ -23,9 +22,18 @@ def init_lms_db():
     conn = get_db()
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
+    _migrate_add_course_owner(conn)
     _migrate_legacy_quiz_body(conn)
     conn.commit()
     conn.close()
+
+
+def _migrate_add_course_owner(conn):
+    """SQLite CREATE TABLE IF NOT EXISTS không thêm column vào bảng có sẵn.
+    Bảng lms_courses đã ship trước khi có owner_id -> ALTER TABLE nếu thiếu."""
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(lms_courses)").fetchall()]
+    if "owner_id" not in cols:
+        conn.execute("ALTER TABLE lms_courses ADD COLUMN owner_id INTEGER REFERENCES lms_users(id)")
 
 
 def _migrate_legacy_quiz_body(conn):
@@ -62,22 +70,63 @@ def _migrate_legacy_quiz_body(conn):
 STAFF_ROLES = ("admin", "instructor")
 
 
+def is_admin():
+    return session.get("lms_user_role") == "admin"
+
+
+def is_instructor():
+    return session.get("lms_user_role") == "instructor"
+
+
 def is_staff():
     return session.get("lms_user_role") in STAFF_ROLES
 
 
-def require_staff():
-    """Trả về None nếu OK. Ngược lại trả response (redirect về login hoặc 403)
-    để caller `return` thẳng."""
+def _forbid(msg):
+    return lms_page(
+        f'<div class="page"><div class="card"><div class="empty">'
+        f'<div class="icon">🚫</div><p>403 — {msg}</p></div></div></div>',
+        active="", title="403 Forbidden"), 403
+
+
+def require_login():
     if session.get("lms_user_id") is None:
         return redirect(url_for("lms_enrollment.login", next=request.path))
-    if not is_staff():
-        return lms_page(
-            '<div class="page"><div class="card"><div class="empty">'
-            '<div class="icon">🚫</div>'
-            '<p>403 — chỉ admin hoặc instructor mới truy cập được trang này.</p></div></div></div>',
-            active="", title="403 Forbidden"), 403
     return None
+
+
+def require_staff():
+    """Trả None nếu OK, ngược lại response để caller `return` thẳng."""
+    gate = require_login()
+    if gate: return gate
+    if not is_staff():
+        return _forbid("chỉ admin hoặc instructor mới truy cập được trang này.")
+    return None
+
+
+def require_admin():
+    gate = require_login()
+    if gate: return gate
+    if not is_admin():
+        return _forbid("chỉ admin mới truy cập được trang này.")
+    return None
+
+
+def require_course_access(course_id):
+    """Admin: pass. Instructor: pass nếu owner. Ai khác: 403.
+    Trả response 403/redirect nếu không có quyền, ngược lại None."""
+    gate = require_staff()
+    if gate: return gate
+    if is_admin():
+        return None
+    conn = get_db()
+    row = conn.execute("SELECT owner_id FROM lms_courses WHERE id = ?", (course_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None  # Course không tồn tại — để route riêng xử lý 404
+    if row["owner_id"] == session.get("lms_user_id"):
+        return None
+    return _forbid("bạn không phải owner của Course này.")
 
 
 def lms_nav(active=""):
@@ -98,12 +147,20 @@ def lms_nav(active=""):
     else:
         auth_html = '<a class="btn btn-ghost btn-sm" href="/lms/login">Đăng nhập</a>'
 
-    staff_links = (
-        f'<a href="/lms/programs" {cls("programs")}>Programs</a>'
-        f'<a href="/lms/courses" {cls("courses")}>Courses</a>'
-        f'<a href="/lms/learners" {cls("learners")}>Learners</a>'
-        f'<a href="/lms/reports" {cls("reports")}>Reports</a>'
-    ) if is_staff() else ""
+    if is_admin():
+        staff_links = (
+            f'<a href="/lms/programs" {cls("programs")}>Programs</a>'
+            f'<a href="/lms/courses" {cls("courses")}>Courses</a>'
+            f'<a href="/lms/learners" {cls("learners")}>Learners</a>'
+            f'<a href="/lms/reports" {cls("reports")}>Reports</a>'
+        )
+    elif is_instructor():
+        staff_links = (
+            f'<a href="/lms/courses" {cls("courses")}>My Courses (Teach)</a>'
+            f'<a href="/lms/reports" {cls("reports")}>Reports</a>'
+        )
+    else:
+        staff_links = ""
 
     return f"""
     <nav class="topnav">
@@ -178,7 +235,7 @@ def dashboard():
 
 @lms_bp.route("/programs", methods=["GET", "POST"])
 def programs():
-    gate = require_staff()
+    gate = require_admin()
     if gate: return gate
     conn = get_db()
     if request.method == "POST":
@@ -260,9 +317,11 @@ def courses():
         description = request.form.get("description", "").strip()
         program_id = request.form.get("program_id")
         if title and program_id:
+            # Instructor tự động owner course họ tạo; admin có thể tạo course không owner.
+            owner_id = session.get("lms_user_id") if is_instructor() else None
             conn.execute(
-                "INSERT INTO lms_courses (program_id, title, description) VALUES (?, ?, ?)",
-                (program_id, title, description),
+                "INSERT INTO lms_courses (program_id, title, description, owner_id) VALUES (?, ?, ?, ?)",
+                (program_id, title, description, owner_id),
             )
             conn.commit()
         conn.close()
@@ -275,12 +334,19 @@ def courses():
                       (SELECT COUNT(*) FROM lms_lessons l WHERE l.course_id = c.id) lesson_count,
                       (SELECT COUNT(*) FROM lms_enrollments e WHERE e.course_id = c.id) learner_count
                FROM lms_courses c JOIN lms_programs p ON p.id = c.program_id"""
-    params = ()
+    where_clauses = []
+    params = []
     if program_id:
-        query += " WHERE c.program_id = ?"
-        params = (program_id,)
+        where_clauses.append("c.program_id = ?")
+        params.append(program_id)
+    if is_instructor():
+        # Instructor chỉ thấy Course họ own.
+        where_clauses.append("c.owner_id = ?")
+        params.append(session.get("lms_user_id"))
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
     query += " ORDER BY c.created_at DESC"
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(query, tuple(params)).fetchall()
     conn.close()
 
     program_options = "".join(
@@ -346,7 +412,7 @@ def courses():
 
 @lms_bp.route("/courses/<int:course_id>", methods=["GET"])
 def course_detail(course_id):
-    gate = require_staff()
+    gate = require_course_access(course_id)
     if gate: return gate
     conn = get_db()
     course = conn.execute(
@@ -440,7 +506,7 @@ def course_detail(course_id):
 
 @lms_bp.route("/courses/<int:course_id>/lessons", methods=["POST"])
 def add_lesson(course_id):
-    gate = require_staff()
+    gate = require_course_access(course_id)
     if gate: return gate
     title = request.form.get("title", "").strip()
     content_type = request.form.get("content_type", "text")
@@ -477,6 +543,11 @@ def lesson_questions(lesson_id):
         return lms_page(
             '<div class="page"><div class="empty"><p>Lesson này không phải quiz</p></div></div>',
             active="courses", title="Not found"), 404
+    # Ownership check trên course chứa lesson này
+    access = require_course_access(lesson["course_id"])
+    if access:
+        conn.close()
+        return access
 
     if request.method == "POST":
         delete_id = request.form.get("delete_id")

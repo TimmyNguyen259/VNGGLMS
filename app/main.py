@@ -18,16 +18,19 @@ from flask import Flask, redirect  # noqa: E402
 from modules.lms.routes import lms_bp, init_lms_db  # noqa: E402
 from modules.lms.enrollment import enrollment_bp  # noqa: E402
 from modules.lms.reports import reports_bp  # noqa: E402
+from modules.lms.sso import sso_bp, init_sso  # noqa: E402
 
 app = Flask(__name__)
 # Dev-only secret for session cookies. Override via env var in real deployments.
 app.secret_key = os.environ.get("VNGG_LMS_SECRET_KEY", "vngg-lms-dev-secret-change-me")
 
 init_lms_db()
+sso_enabled = init_sso(app)  # no-op nếu env SSO_* chưa đủ
 
 app.register_blueprint(lms_bp)
 app.register_blueprint(enrollment_bp)
 app.register_blueprint(reports_bp)
+app.register_blueprint(sso_bp)
 
 
 @app.route("/")

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS lms_courses (
   title       TEXT NOT NULL,
   description TEXT,
   order_index INTEGER DEFAULT 0,
+  owner_id    INTEGER REFERENCES lms_users(id) ON DELETE SET NULL,  -- instructor owner; NULL = admin-managed
   created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS lms_quiz_questions (
 
 -- Index phục vụ query dashboard (đếm learner theo course, progress trung bình)
 CREATE INDEX IF NOT EXISTS idx_lms_courses_program ON lms_courses(program_id);
+CREATE INDEX IF NOT EXISTS idx_lms_courses_owner ON lms_courses(owner_id);
 CREATE INDEX IF NOT EXISTS idx_lms_lessons_course ON lms_lessons(course_id);
 CREATE INDEX IF NOT EXISTS idx_lms_enrollments_course ON lms_enrollments(course_id);
 CREATE INDEX IF NOT EXISTS idx_lms_quiz_questions_lesson ON lms_quiz_questions(lesson_id);

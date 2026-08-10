@@ -5,15 +5,21 @@ chỉ query lms_enrollments/lms_courses/lms_programs đã có.
 """
 import csv
 import io
-from flask import Blueprint, request, Response
+from flask import Blueprint, request, Response, session
 
 from app.shared import get_db
-from .routes import lms_page, require_staff
+from .routes import lms_page, require_staff, is_instructor
 
 reports_bp = Blueprint("lms_reports", __name__, url_prefix="/lms")
 
 
-def _fetch_report_rows(conn, program_id=None):
+def _scoped_owner_id():
+    """Trả về user_id nếu request đến từ instructor (dùng để filter),
+    None nếu là admin (không filter)."""
+    return session.get("lms_user_id") if is_instructor() else None
+
+
+def _fetch_report_rows(conn, program_id=None, owner_id=None):
     query = """
         SELECT p.id program_id, p.name program_name,
                c.id course_id, c.title course_title,
@@ -24,12 +30,15 @@ def _fetch_report_rows(conn, program_id=None):
         JOIN lms_courses c ON c.program_id = p.id
         LEFT JOIN lms_enrollments e ON e.course_id = c.id
     """
-    params = ()
+    where, params = [], []
     if program_id:
-        query += " WHERE p.id = ?"
-        params = (program_id,)
+        where.append("p.id = ?"); params.append(program_id)
+    if owner_id is not None:
+        where.append("c.owner_id = ?"); params.append(owner_id)
+    if where:
+        query += " WHERE " + " AND ".join(where)
     query += " GROUP BY c.id ORDER BY p.name, c.title"
-    return conn.execute(query, params).fetchall()
+    return conn.execute(query, tuple(params)).fetchall()
 
 
 # ------------------------------------------------------------------
@@ -43,7 +52,7 @@ def reports():
     conn = get_db()
     program_id = request.args.get("program_id")
     programs_list = conn.execute("SELECT id, name FROM lms_programs ORDER BY name").fetchall()
-    rows = _fetch_report_rows(conn, program_id)
+    rows = _fetch_report_rows(conn, program_id, owner_id=_scoped_owner_id())
     conn.close()
 
     program_options = '<option value="">-- Tất cả Program --</option>' + "".join(
@@ -133,12 +142,16 @@ def export_csv():
         JOIN lms_programs p ON p.id = c.program_id
         JOIN lms_users u ON u.id = e.user_id
     """
-    params = ()
+    where, params = [], []
     if program_id:
-        query += " WHERE p.id = ?"
-        params = (program_id,)
+        where.append("p.id = ?"); params.append(program_id)
+    owner_id = _scoped_owner_id()
+    if owner_id is not None:
+        where.append("c.owner_id = ?"); params.append(owner_id)
+    if where:
+        query += " WHERE " + " AND ".join(where)
     query += " ORDER BY p.name, c.title, u.name"
-    rows = conn.execute(query, params).fetchall()
+    rows = conn.execute(query, tuple(params)).fetchall()
     conn.close()
 
     buffer = io.StringIO()

@@ -1,72 +1,87 @@
 # LMS Core — Setup Note
 
-## Cấu trúc file trong repo `VNGG_ATS-`
+Standalone repo. Xem [`../../README.md`](../../README.md) cho cách chạy nhanh.
+
+## Cấu trúc
 
 ```
-modules/
-  lms/
-    __init__.py       (rỗng)
-    schema.sql
-    routes.py         Course Management (Dashboard/Programs/Courses/Lessons/Quiz editor)
-    enrollment.py     Enrollment Engine (Learners/Enroll/My Courses/Learn/Login)
-    reports.py        Reporting (Dashboard progress + Export CSV)
+app/
+  main.py          Flask entry, mount 4 Blueprints, redirect / -> /lms/, init_sso()
+  shared.py        get_db(), BASE_STYLE, BASE_JS. DB = lms.db in repo root.
+modules/lms/
+  routes.py        Course Management + shared helpers (require_login/staff/admin, require_course_access)
+  enrollment.py    Learners, Login (dev dropdown), My Courses, Learn, Admin view-learner
+  reports.py       Reports dashboard + CSV export
+  sso.py           Microsoft Entra OIDC — env-driven; no-op nếu env chưa đủ
+  schema.sql       lms_programs / lms_courses (owner_id!) / lms_lessons / lms_quiz_questions
+                   / lms_users / lms_enrollments / lms_lesson_progress
 ```
 
-## Đăng ký Blueprint trong `app/main.py`
+## Roles & quyền
 
-```python
-from modules.lms.routes import lms_bp, init_lms_db
-from modules.lms.enrollment import enrollment_bp
-from modules.lms.reports import reports_bp
+| Route | Learner | Instructor | Admin |
+|---|:-:|:-:|:-:|
+| `/lms/`, `/lms/login` | ✓ | ✓ | ✓ |
+| `/lms/my-courses`, `/lms/courses/<id>/learn*` | ✓ (enroll gated) | ✓ | ✓ |
+| `/lms/courses` (list) | 403 | Only own (owner_id = self) | All |
+| `/lms/courses/<id>` (edit lessons) | 403 | Only if owner | All |
+| `/lms/lessons/<id>/questions` | 403 | Only if owner of parent course | All |
+| `/lms/courses/<id>/learners` (assign) | 403 | Only if owner | All |
+| `/lms/reports`, `.csv` | 403 | Scoped to own courses | All |
+| `/lms/programs`, `/lms/learners`, `/lms/learners/<id>` | 403 | 403 | ✓ |
 
-app.secret_key = os.environ.get("VNGG_SECRET_KEY", "vngg-ats-dev-secret-change-me")
+Instructor không thấy Programs/Learners tabs trong nav. Nav Courses/Reports tabs
+đổi tên thành "My Courses (Teach)" / "Reports" cho instructor.
 
-app.register_blueprint(lms_bp)
-app.register_blueprint(enrollment_bp)
-app.register_blueprint(reports_bp)
+## Auth
 
-init_lms_db()  # tạo bảng lms_* + migrate quiz cũ (nếu có)
+### Dev dropdown
+Mặc định `/lms/login` hiển thị dropdown pick 1 `lms_users` row → set `session["lms_user_id/name/role"]`. Dùng khi build/test local.
+
+### Microsoft Entra SSO (production)
+Set 3 env vars → nút "Đăng nhập bằng Microsoft" hiện trên `/lms/login`, dropdown vẫn còn dùng làm dev fallback:
+
+```bash
+export SSO_TENANT_ID="<Entra tenant GUID>"          # vd 72f988bf-... hoặc "common"
+export SSO_CLIENT_ID="<Application (client) ID>"
+export SSO_CLIENT_SECRET="<Client secret>"
+# tuỳ chọn:
+export SSO_REDIRECT_URI="https://lms.vng.com.vn/lms/sso/callback"
+export SSO_ALLOWED_DOMAIN="vng.com.vn"
+export SSO_ADMIN_EMAILS="cto@vng.com.vn,hr-head@vng.com.vn"
+export VNGG_LMS_SECRET_KEY="<long random string>"    # bắt buộc đổi ở prod
 ```
 
-Landing card `E — LMS` đã có sẵn trong `MODULES` list.
+Đăng ký app ở Entra:
+1. Azure Portal → Entra ID → App registrations → New registration
+2. Redirect URI (Web): `https://<host>/lms/sso/callback`
+3. Certificates & secrets → New client secret
+4. API permissions → Add: `openid`, `profile`, `email` (Delegated, Microsoft Graph)
+5. Copy Tenant ID / Client ID / Secret vào env
 
-## Trạng thái hiện tại
+Lần đầu login: tự động tạo row trong `lms_users` (email + name từ Entra),
+role='learner' (hoặc 'admin' nếu email nằm trong `SSO_ADMIN_EMAILS`).
 
-### Đã xong
-
-1. **Import path** — `from app.shared import ...` khớp với cấu trúc thật (repo root đã prepend vào `sys.path` trong `main.py`).
-2. **Session-based auth (stopgap)** — `/lms/login` chọn learner từ dropdown, lưu vào `session["lms_user_id"]`. Ba route `my-courses` / `learn` / `learn/<lesson>` gọi `_require_login()` → 302 về `/lms/login?next=…` nếu chưa login. URL tampering không còn tick lesson hộ người khác được.
-3. **Light theme (cream + orange)** — token trong `app/shared.py:19-38`. Heading font `Space Grotesk`, body `DM Sans`. Áp dụng chung cho cả `scheduling` module.
-4. **Multi-question quiz** — bảng `lms_quiz_questions` (schema.sql:65). 1 quiz lesson chứa nhiều câu hỏi, mỗi câu có đáp án đúng + lựa chọn sai (phân cách `|`). Điểm = `correct / total * 100`. Editor tại `/lms/lessons/<id>/questions`.
-5. **Legacy quiz migration** — `_migrate_legacy_quiz_body()` chạy trong `init_lms_db()`: quiz cũ lưu dạng chuỗi `"Q ||| correct ||| A | B"` trong `content_body` được lift sang bảng câu hỏi mới. Idempotent — chạy lại nhiều lần không double.
-6. **Admin view-learner** — `/lms/learners/<user_id>` (read-only) hiển thị tiến độ chi tiết từng lesson cho 1 learner, dùng cho admin không muốn login-as.
-
-### Còn nợ trước khi launch thật
-
-1. **SSO thay cho session dropdown** — hiện `/lms/login` chỉ liệt kê tất cả learner cho ai vào cũng chọn được. Cần thay bằng auth thật (OAuth/SAML/etc.) trước production. Session cookie đang dùng dev secret key — set `VNGG_SECRET_KEY` env var trong deployment.
-2. **RBAC cho admin routes** — `/lms/programs`, `/lms/courses`, `/lms/learners`, `/lms/reports` hiện không có gate. Ai vào cũng tạo/sửa/xoá được. Cần role check khi có SSO.
-3. **Light theme là do Claude Code phác** — mockup Dashboard/Jobs/Pipeline gốc không có trong repo. Nếu design team có file CSS/hình ảnh chính thức, thay giá trị token trong `shared.py:19-38` cho khớp.
-
-## Test nhanh (checklist)
+## Test checklist
 
 ```
-Setup:
-1. /lms/programs        → tạo Program "NextGen 2026"
-2. /lms/courses         → tạo Course thuộc Program đó
-3. /lms/courses/<id>    → thêm 2-3 Lesson (text + 1 quiz)
-4. /lms/lessons/<id>/questions  → thêm nhiều câu hỏi cho quiz lesson
-5. /lms/learners        → thêm 2 Learner
-6. /lms/courses/<id>/learners   → gán cả 2 Learner vào Course
+Admin flow:
+1. /lms/login → SSO hoặc dropdown pick admin
+2. /lms/programs → tạo Program
+3. /lms/courses → tạo Course (owner_id = NULL)
+4. /lms/learners → thêm learner
+5. /lms/courses/<id>/learners → gán learner vào course
+6. /lms/reports → xem tất cả progress + export CSV
+
+Instructor flow:
+7. Login as instructor → chỉ thấy Courses/Reports (không thấy Programs/Learners)
+8. Tạo Course → owner_id = self
+9. Không mở được course của instructor khác (403)
+10. Reports chỉ show course của mình
 
 Learner flow:
-7. /lms/login           → chọn learner 1 (Alice)
-8. /lms/my-courses      → thấy course được gán
-9. Học từng lesson, mark done, làm quiz
-10. Logout → đăng nhập learner 2 (Bob) → xác nhận Bob progress vẫn = 0
-    (chứng tỏ URL tampering không tick hộ được)
-
-Admin flow:
-11. /lms/learners/1     → xem tiến độ chi tiết Alice (progress bar + per-lesson status + quiz score)
-12. /lms/reports        → xem % progress cấp Program/Course
-13. /lms/reports/export.csv → tải CSV
+11. Login as learner → chỉ thấy Dashboard + My Courses
+12. /lms/my-courses → xem course được gán
+13. Học từng lesson (text/video/pdf/quiz), video YouTube+Vimeo embed inline, PDF viewer inline
+14. Logout, đăng nhập account khác → progress không mix
 ```
