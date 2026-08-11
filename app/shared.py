@@ -3,7 +3,9 @@ import os
 import sqlite3
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(ROOT, "lms.db")
+# LMS_DB_PATH env var cho phép Docker mount volume ở đường dẫn tuỳ ý (vd /data/lms.db).
+# Không set -> mặc định lms.db trong repo root.
+DB_PATH = os.environ.get("LMS_DB_PATH") or os.path.join(ROOT, "lms.db")
 
 
 def get_db():

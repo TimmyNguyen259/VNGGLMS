@@ -1,0 +1,15 @@
+services:
+  lms:
+    build: .
+    image: vngg-lms:local
+    container_name: vngg-lms
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - lms-data:/data
+    restart: unless-stopped
+
+volumes:
+  lms-data:

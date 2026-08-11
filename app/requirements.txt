@@ -1,4 +1,6 @@
 flask==3.1.1
+# Production WSGI server — dev vẫn dùng flask run/app.run() được
+gunicorn>=21
 # SSO (OIDC) — chỉ kích hoạt khi có env SSO_TENANT_ID/SSO_CLIENT_ID/SSO_CLIENT_SECRET
 Authlib>=1.3
 requests>=2.31  # Authlib.integrations.flask_client -> requests transport
