@@ -9,7 +9,7 @@ không tick lesson hộ được người khác. Cần thay bằng SSO thật tr
 """
 import html
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 from flask import Blueprint, request, redirect, url_for, session
 
@@ -118,7 +118,7 @@ def recompute_progress(conn, enrollment_id):
 
     pct = int(round((done / total) * 100)) if total else 0
     status = "completed" if pct >= 100 and total > 0 else "in_progress"
-    completed_at = datetime.utcnow().isoformat() if status == "completed" else None
+    completed_at = datetime.now(timezone.utc).isoformat() if status == "completed" else None
 
     conn.execute(
         """UPDATE lms_enrollments

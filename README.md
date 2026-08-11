@@ -12,6 +12,15 @@ python -c "from app.main import app; app.run(port=5000)"
 Mở `http://127.0.0.1:5000/` → tự redirect `/lms/`. Login dùng dropdown ở `/lms/login`
 (pick 1 learner đã seed).
 
+## Chạy test
+
+```bash
+pip install -r app/requirements-dev.txt
+pytest
+```
+
+51 test cover: RBAC + instructor scoping (17), quiz scoring/migration/progress (6), media embed (13), SSO on/off routing + user provisioning (7), + 8 anon-redirect params.
+
 ## Bật Microsoft Entra SSO ở production
 
 Set 3 env vars → nút "Đăng nhập bằng Microsoft" hiện trên `/lms/login`:
