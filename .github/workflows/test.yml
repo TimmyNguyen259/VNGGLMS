@@ -23,4 +23,15 @@ jobs:
         run: pip install -r app/requirements-dev.txt
 
       - name: Run pytest
-        run: pytest -q
+        run: |
+          set +e
+          pytest -v --tb=long 2>&1 | tee test-output.txt
+          code=${PIPESTATUS[0]}
+          {
+            echo '## pytest output'
+            echo
+            echo '```'
+            cat test-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $code
