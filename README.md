@@ -43,6 +43,16 @@ docker build -t vngg-lms .
 docker run --rm -p 8000:8000 -v vngg-lms-data:/data --env-file .env vngg-lms
 ```
 
+## Deploy lên Fly.io
+
+`fly.toml` cấu hình sẵn (Singapore region, 256MB, volume cho SQLite). Xem [DEPLOY.md](DEPLOY.md) cho từng bước:
+- Cài `flyctl`
+- `flyctl auth login` (browser)
+- `flyctl launch --no-deploy`
+- `flyctl volumes create vngg_lms_data --region sin --size 1`
+- `flyctl secrets set VNGG_LMS_SECRET_KEY=...`
+- `flyctl deploy`
+
 ## Bật Microsoft Entra SSO ở production
 
 Set 3 env vars → nút "Đăng nhập bằng Microsoft" hiện trên `/lms/login`:

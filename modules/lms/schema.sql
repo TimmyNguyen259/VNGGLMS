@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS lms_courses (
   description TEXT,
   order_index INTEGER DEFAULT 0,
   owner_id    INTEGER REFERENCES lms_users(id) ON DELETE SET NULL,  -- instructor owner; NULL = admin-managed
+  due_date    TEXT,                                                  -- ISO date 'YYYY-MM-DD' hoặc NULL nếu không có deadline
   created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 

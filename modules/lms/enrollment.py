@@ -7,11 +7,13 @@ Auth: stopgap Flask session — trang /lms/login cho phép chọn 1 learner rồ
 vào session["lms_user_id"]. Không phải SSO thật, nhưng đủ để URL tampering
 không tick lesson hộ được người khác. Cần thay bằng SSO thật trước khi launch.
 """
+import csv
 import html
+import io
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
-from flask import Blueprint, request, redirect, url_for, session
+from flask import Blueprint, request, redirect, url_for, session, Response, abort
 
 from app.shared import get_db
 from .routes import lms_page, require_staff, require_admin, require_course_access
@@ -196,7 +198,10 @@ def learners():
               </select>
             </div>
           </div>
-          <button class="btn btn-primary" type="submit">+ Thêm Learner</button>
+          <div style="display:flex;gap:.5rem;align-items:center;">
+            <button class="btn btn-primary" type="submit">+ Thêm Learner</button>
+            <a class="btn btn-ghost" href="/lms/learners/import">⬆ Import từ CSV</a>
+          </div>
         </form>
       </div>
 
@@ -209,6 +214,124 @@ def learners():
     </div>
     """
     return lms_page(content, active="learners", title="Learners")
+
+
+# ------------------------------------------------------------------
+# Bulk import learners từ CSV
+# ------------------------------------------------------------------
+
+_VALID_ROLES = ("learner", "instructor", "admin")
+
+
+def _parse_learners_csv(text):
+    """Parse CSV text. Trả về (rows, error). rows là list dict {name,email,role}.
+    Yêu cầu header 'name,email,role' (không phân biệt hoa thường, thứ tự cột tuỳ).
+    Cột 'role' có thể thiếu -> default 'learner'."""
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+    except Exception as e:
+        return [], f"CSV không parse được: {e}"
+    if not reader.fieldnames:
+        return [], "CSV trống hoặc thiếu header."
+    fieldmap = {f.strip().lower(): f for f in reader.fieldnames if f}
+    if "name" not in fieldmap or "email" not in fieldmap:
+        return [], f"CSV cần có ít nhất 2 cột 'name' và 'email'. Đang có: {reader.fieldnames}"
+    rows = []
+    for r in reader:
+        rows.append({
+            "name": (r.get(fieldmap["name"]) or "").strip(),
+            "email": (r.get(fieldmap["email"]) or "").strip().lower(),
+            "role": (r.get(fieldmap.get("role", ""), "") or "learner").strip().lower(),
+        })
+    return rows, None
+
+
+@enrollment_bp.route("/learners/import", methods=["GET", "POST"])
+def learners_import():
+    gate = require_admin()
+    if gate: return gate
+
+    summary_html = ""
+    if request.method == "POST":
+        f = request.files.get("csv_file")
+        if not f or not f.filename:
+            summary_html = '<div class="card"><div class="empty"><p>Chưa chọn file CSV.</p></div></div>'
+        else:
+            text = f.stream.read().decode("utf-8-sig", errors="replace")
+            rows, err = _parse_learners_csv(text)
+            if err:
+                summary_html = f'<div class="card"><div class="empty"><p style="color:var(--red)">{html.escape(err)}</p></div></div>'
+            else:
+                inserted, skipped_dup, errored = [], [], []
+                conn = get_db()
+                for r in rows:
+                    if not r["name"] or not r["email"] or "@" not in r["email"]:
+                        errored.append((r, "thiếu name/email hoặc email không hợp lệ"))
+                        continue
+                    if r["role"] not in _VALID_ROLES:
+                        errored.append((r, f"role không hợp lệ ({r['role']!r})"))
+                        continue
+                    try:
+                        conn.execute("INSERT INTO lms_users (name, email, role) VALUES (?, ?, ?)",
+                                     (r["name"], r["email"], r["role"]))
+                        inserted.append(r)
+                    except Exception:
+                        skipped_dup.append(r)  # UNIQUE(email) constraint
+                conn.commit(); conn.close()
+
+                def _list_rows(items, label_col=None):
+                    if not items: return "—"
+                    def one(it):
+                        r = it if isinstance(it, dict) else it[0]
+                        reason = f" — {html.escape(it[1])}" if isinstance(it, tuple) else ""
+                        return f'<li>{html.escape(r["name"])} &lt;{html.escape(r["email"])}&gt; ({html.escape(r["role"])}){reason}</li>'
+                    return f'<ul style="margin-left:1.2rem;">{"".join(one(x) for x in items[:20])}</ul>' + \
+                           (f'<div style="color:var(--muted);font-size:.8rem;">…và {len(items)-20} nữa</div>' if len(items)>20 else "")
+
+                summary_html = f"""
+                <div class="card">
+                  <h2 style="font-size:1rem;margin-bottom:.75rem;">Kết quả import</h2>
+                  <div class="stats-row">
+                    <div class="stat-pill green"><div class="val">{len(inserted)}</div><div class="lbl">Đã thêm</div></div>
+                    <div class="stat-pill amber"><div class="val">{len(skipped_dup)}</div><div class="lbl">Skip (trùng email)</div></div>
+                    <div class="stat-pill orange"><div class="val">{len(errored)}</div><div class="lbl">Lỗi</div></div>
+                  </div>
+                  <details style="margin-top:1rem;"><summary style="cursor:pointer;font-weight:600;">Đã thêm ({len(inserted)})</summary>{_list_rows(inserted)}</details>
+                  <details style="margin-top:.5rem;"><summary style="cursor:pointer;font-weight:600;">Skip trùng email ({len(skipped_dup)})</summary>{_list_rows(skipped_dup)}</details>
+                  <details style="margin-top:.5rem;"><summary style="cursor:pointer;font-weight:600;">Lỗi ({len(errored)})</summary>{_list_rows(errored)}</details>
+                  <p style="margin-top:1rem;"><a class="btn btn-primary" href="/lms/learners">← Về Learners</a></p>
+                </div>
+                """
+
+    content = f"""
+    <div class="page">
+      <div class="page-header">
+        <h1>Import Learners từ CSV</h1>
+        <p>File CSV cần header 'name,email,role' (role tuỳ chọn, default 'learner').</p>
+      </div>
+      {summary_html}
+      <div class="card">
+        <form method="POST" enctype="multipart/form-data">
+          <div class="form-group">
+            <label class="form-label">File CSV</label>
+            <input class="form-control" type="file" name="csv_file" accept=".csv,text/csv" required>
+          </div>
+          <div style="display:flex;gap:.5rem;">
+            <button class="btn btn-primary" type="submit">Import</button>
+            <a class="btn btn-ghost" href="/lms/learners">Huỷ</a>
+          </div>
+        </form>
+        <details style="margin-top:1rem;">
+          <summary style="cursor:pointer;color:var(--muted);font-size:.85rem;">Ví dụ CSV</summary>
+          <pre style="background:var(--surface2);padding:.75rem;border-radius:6px;font-size:.8rem;margin-top:.5rem;">name,email,role
+Alice Nguyen,alice@vng.com.vn,learner
+Bob Tran,bob@vng.com.vn,learner
+Carol Le,carol@vng.com.vn,instructor</pre>
+        </details>
+      </div>
+    </div>
+    """
+    return lms_page(content, active="learners", title="Import Learners")
 
 
 # ------------------------------------------------------------------
@@ -469,7 +592,7 @@ def my_courses():
 
     conn = get_db()
     rows = conn.execute(
-        """SELECT e.*, c.title, c.description, p.name program_name
+        """SELECT e.*, c.title, c.description, c.due_date, p.name program_name
            FROM lms_enrollments e
            JOIN lms_courses c ON c.id = e.course_id
            JOIN lms_programs p ON p.id = c.program_id
@@ -478,17 +601,38 @@ def my_courses():
     ).fetchall()
     conn.close()
 
+    from datetime import date
+    today = date.today().isoformat()
+    def _due_line(r):
+        d = r["due_date"]
+        if not d: return ""
+        if r["status"] == "completed": return f'<div style="color:var(--muted);font-size:.78rem;margin-top:.35rem;">Deadline: {d}</div>'
+        overdue = d < today
+        color = "var(--red)" if overdue else "var(--muted)"
+        prefix = "OVERDUE — deadline: " if overdue else "Deadline: "
+        return f'<div style="color:{color};font-size:.78rem;font-weight:600;margin-top:.35rem;">{prefix}{d}</div>'
+
+    def _cert_link(r):
+        if r["status"] != "completed": return ""
+        return (f'<a class="btn btn-primary btn-sm" href="/lms/my-courses/{r["id"]}/certificate.pdf" '
+                f'style="margin-top:.6rem;display:inline-flex;align-items:center;gap:.35rem;" '
+                f'onclick="event.stopPropagation();">🎓 Tải Certificate</a>')
+
     cards_html = "".join(
-        f"""<a class="mod-card live" href="/lms/courses/{r['course_id']}/learn">
-              <div class="mod-ico">📚</div>
-              <h2>{r['title']}</h2>
-              <p>{r['program_name']}</p>
-              <div class="score-bar" style="margin-top:.75rem;">
-                <div class="score-bar-track"><div class="score-bar-fill" style="width:{r['progress_pct']}%"></div></div>
-                <div class="score-num">{r['progress_pct']}%</div>
-              </div>
-              <div class="status-line">{'HOÀN THÀNH' if r['status']=='completed' else 'ĐANG HỌC'}</div>
-            </a>"""
+        f"""<div class="mod-card live" style="display:block;">
+              <a href="/lms/courses/{r['course_id']}/learn" style="color:inherit;text-decoration:none;display:block;">
+                <div class="mod-ico">📚</div>
+                <h2>{r['title']}</h2>
+                <p>{r['program_name']}</p>
+                <div class="score-bar" style="margin-top:.75rem;">
+                  <div class="score-bar-track"><div class="score-bar-fill" style="width:{r['progress_pct']}%"></div></div>
+                  <div class="score-num">{r['progress_pct']}%</div>
+                </div>
+                <div class="status-line">{'HOÀN THÀNH' if r['status']=='completed' else 'ĐANG HỌC'}</div>
+                {_due_line(r)}
+              </a>
+              {_cert_link(r)}
+            </div>"""
         for r in rows
     ) or '<div class="empty"><p>Chưa được gán Course nào</p></div>'
 
@@ -499,6 +643,120 @@ def my_courses():
     </div>
     """
     return lms_page(content, active="my-courses", title="My Courses")
+
+
+# ------------------------------------------------------------------
+# Certificate PDF — chỉ phát khi enrollment đã completed
+# ------------------------------------------------------------------
+
+def _render_certificate_pdf(learner_name, course_title, program_name, completed_at):
+    """Trả bytes PDF cert 1 trang, A4 landscape."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import cm
+    from reportlab.lib.colors import HexColor
+
+    buf = io.BytesIO()
+    W, H = landscape(A4)
+    c = canvas.Canvas(buf, pagesize=landscape(A4))
+
+    # Background cream
+    c.setFillColor(HexColor("#faf7f2"))
+    c.rect(0, 0, W, H, fill=1, stroke=0)
+
+    # Outer border (orange)
+    c.setStrokeColor(HexColor("#e8632b"))
+    c.setLineWidth(3)
+    c.rect(1*cm, 1*cm, W - 2*cm, H - 2*cm, fill=0)
+    # Inner border (subtle)
+    c.setStrokeColor(HexColor("#d9d1c4"))
+    c.setLineWidth(0.6)
+    c.rect(1.3*cm, 1.3*cm, W - 2.6*cm, H - 2.6*cm, fill=0)
+
+    # Title
+    c.setFillColor(HexColor("#e8632b"))
+    c.setFont("Helvetica-Bold", 40)
+    c.drawCentredString(W/2, H - 4*cm, "Certificate of Completion")
+
+    c.setFillColor(HexColor("#7a6f5f"))
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(W/2, H - 5*cm, "This is to certify that")
+
+    # Learner name
+    c.setFillColor(HexColor("#1e1b16"))
+    c.setFont("Helvetica-Bold", 32)
+    c.drawCentredString(W/2, H - 7*cm, learner_name)
+
+    # Description
+    c.setFillColor(HexColor("#7a6f5f"))
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(W/2, H - 8.3*cm, "has successfully completed the course")
+
+    c.setFillColor(HexColor("#1e1b16"))
+    c.setFont("Helvetica-Bold", 20)
+    c.drawCentredString(W/2, H - 9.7*cm, course_title)
+
+    if program_name:
+        c.setFillColor(HexColor("#7a6f5f"))
+        c.setFont("Helvetica-Oblique", 12)
+        c.drawCentredString(W/2, H - 10.5*cm, f"— program: {program_name}")
+
+    # Date line
+    c.setFillColor(HexColor("#1e1b16"))
+    c.setFont("Helvetica", 12)
+    date_str = (completed_at or "").split("T")[0]
+    c.drawCentredString(W/2, 3*cm, f"Completed on {date_str}")
+
+    # Footer brand
+    c.setFillColor(HexColor("#e8632b"))
+    c.setFont("Helvetica-Bold", 11)
+    c.drawCentredString(W/2, 1.9*cm, "VNGG LMS")
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+@enrollment_bp.route("/my-courses/<int:enrollment_id>/certificate.pdf")
+def certificate(enrollment_id):
+    user_id, resp = _require_login()
+    if resp:
+        return resp
+
+    conn = get_db()
+    row = conn.execute(
+        """SELECT e.*, u.name learner_name, c.title course_title, p.name program_name
+           FROM lms_enrollments e
+           JOIN lms_users u ON u.id = e.user_id
+           JOIN lms_courses c ON c.id = e.course_id
+           JOIN lms_programs p ON p.id = c.program_id
+           WHERE e.id = ?""",
+        (enrollment_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        abort(404)
+    # Learner tự tải cert của mình; admin có thể tải cho bất kỳ ai
+    is_admin_ = session.get("lms_user_role") == "admin"
+    if not is_admin_ and row["user_id"] != user_id:
+        abort(403)
+    if row["status"] != "completed" or row["progress_pct"] < 100:
+        return lms_page(
+            '<div class="page"><div class="card"><div class="empty">'
+            '<div class="icon">🎓</div>'
+            '<p>Certificate chỉ được cấp khi course đã hoàn thành 100%.</p>'
+            '<p><a class="btn btn-ghost btn-sm" href="/lms/my-courses" style="margin-top:.75rem;">← Về My Courses</a></p>'
+            '</div></div></div>',
+            active="my-courses", title="Certificate not ready"), 400
+
+    pdf_bytes = _render_certificate_pdf(
+        row["learner_name"], row["course_title"], row["program_name"], row["completed_at"] or ""
+    )
+    safe_slug = re.sub(r"[^A-Za-z0-9]+", "_", row["course_title"]).strip("_") or "course"
+    filename = f"certificate_{safe_slug}.pdf"
+    return Response(pdf_bytes, mimetype="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 # ------------------------------------------------------------------

@@ -30,10 +30,12 @@ def init_lms_db():
 
 def _migrate_add_course_owner(conn):
     """SQLite CREATE TABLE IF NOT EXISTS không thêm column vào bảng có sẵn.
-    Bảng lms_courses đã ship trước khi có owner_id -> ALTER TABLE nếu thiếu."""
+    Bảng lms_courses đã ship trước khi có owner_id / due_date -> ALTER TABLE nếu thiếu."""
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(lms_courses)").fetchall()]
     if "owner_id" not in cols:
         conn.execute("ALTER TABLE lms_courses ADD COLUMN owner_id INTEGER REFERENCES lms_users(id)")
+    if "due_date" not in cols:
+        conn.execute("ALTER TABLE lms_courses ADD COLUMN due_date TEXT")
 
 
 def _migrate_legacy_quiz_body(conn):
@@ -316,12 +318,13 @@ def courses():
         title = request.form.get("title", "").strip()
         description = request.form.get("description", "").strip()
         program_id = request.form.get("program_id")
+        due_date = request.form.get("due_date", "").strip() or None
         if title and program_id:
             # Instructor tự động owner course họ tạo; admin có thể tạo course không owner.
             owner_id = session.get("lms_user_id") if is_instructor() else None
             conn.execute(
-                "INSERT INTO lms_courses (program_id, title, description, owner_id) VALUES (?, ?, ?, ?)",
-                (program_id, title, description, owner_id),
+                "INSERT INTO lms_courses (program_id, title, description, owner_id, due_date) VALUES (?, ?, ?, ?, ?)",
+                (program_id, title, description, owner_id, due_date),
             )
             conn.commit()
         conn.close()
@@ -354,16 +357,27 @@ def courses():
         for p in programs_list
     )
 
+    from datetime import date
+    today = date.today().isoformat()
+    def due_cell(r):
+        d = r["due_date"]
+        if not d: return '<span style="color:var(--muted);">—</span>'
+        overdue = d < today
+        color = "var(--red)" if overdue else "var(--text)"
+        suffix = ' <span class="badge badge-cancelled" style="margin-left:.35rem;">Overdue</span>' if overdue else ""
+        return f'<span style="color:{color};">{d}</span>{suffix}'
+
     rows_html = "".join(
         f"""<tr>
               <td><a href="/lms/courses/{r['id']}"><strong>{r['title']}</strong></a><br>
                   <span style="color:var(--muted);font-size:.82rem;">{r['program_name']}</span></td>
               <td>{r['lesson_count']}</td>
               <td>{r['learner_count']}</td>
+              <td>{due_cell(r)}</td>
               <td><a class="btn btn-ghost btn-sm" href="/lms/courses/{r['id']}">Quản lý Lesson</a></td>
             </tr>"""
         for r in rows
-    ) or '<tr><td colspan="4"><div class="empty"><p>Chưa có Course nào</p></div></td></tr>'
+    ) or '<tr><td colspan="5"><div class="empty"><p>Chưa có Course nào</p></div></td></tr>'
 
     content = f"""
     <div class="page">
@@ -374,7 +388,7 @@ def courses():
 
       <div class="card">
         <form method="POST">
-          <div class="form-row-3">
+          <div class="form-row">
             <div class="form-group">
               <label class="form-label">Program</label>
               <select class="form-control" name="program_id" required>
@@ -386,9 +400,15 @@ def courses():
               <label class="form-label">Tên Course</label>
               <input class="form-control" name="title" required placeholder="vd: Stakeholder Management">
             </div>
+          </div>
+          <div class="form-row">
             <div class="form-group">
               <label class="form-label">Mô tả</label>
               <input class="form-control" name="description" placeholder="Tuỳ chọn">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Deadline (tuỳ chọn)</label>
+              <input class="form-control" name="due_date" type="date">
             </div>
           </div>
           <button class="btn btn-primary" type="submit">+ Tạo Course</button>
@@ -397,7 +417,7 @@ def courses():
 
       <div class="card table-wrap">
         <table>
-          <thead><tr><th>Course</th><th>Lessons</th><th>Learners</th><th></th></tr></thead>
+          <thead><tr><th>Course</th><th>Lessons</th><th>Learners</th><th>Deadline</th><th></th></tr></thead>
           <tbody>{rows_html}</tbody>
         </table>
       </div>

@@ -1,0 +1,37 @@
+# fly.toml — VNGG LMS trên Fly.io
+# Chạy `flyctl launch --no-deploy` lần đầu để Fly.io tạo app + gán tên duy nhất
+# (nó sẽ hỏi và có thể overwrite các giá trị dưới đây). Sau đó `flyctl deploy`.
+
+app = "vngg-lms"                       # đổi thành tên app thật sau `flyctl launch`
+primary_region = "sin"                 # Singapore — gần VN nhất
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+LMS_DB_PATH = "/data/lms.db"
+
+[http_service]
+internal_port = 8000
+force_https = true
+auto_stop_machines = "stop"            # cho phép Fly tắt máy khi không request -> tiết kiệm free tier
+auto_start_machines = true
+min_machines_running = 0
+
+[[http_service.checks]]
+interval = "30s"
+timeout = "5s"
+grace_period = "10s"
+method = "GET"
+path = "/health"
+
+# Volume persistent cho SQLite. Tạo trước bằng:
+#   flyctl volumes create vngg_lms_data --region sin --size 1
+[[mounts]]
+source = "vngg_lms_data"
+destination = "/data"
+
+[[vm]]
+memory = "256mb"                       # đủ cho gunicorn 2 workers + SQLite ở scale demo
+cpu_kind = "shared"
+cpus = 1
